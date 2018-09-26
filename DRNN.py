@@ -17,7 +17,7 @@ from keras.utils.np_utils import to_categorical
 from keras.layers import Dense, Embedding, Input, CuDNNGRU, GlobalMaxPooling1D, BatchNormalization, TimeDistributed
 from keras.layers import Convolution1D, Dropout, GRU
 
-df2 = pd.read_csv("yelp_2013.csv")
+df2 = pd.read_csv("yelp_2013.csv") #The information about the test dataset could be found at https://github.com/zepingyu0512/srnn
 Y = df2.stars.values-1
 Y = to_categorical(Y,num_classes=5)
 X = df2.text.values
