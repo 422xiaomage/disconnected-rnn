@@ -18,7 +18,6 @@ from keras.layers import Dense, Embedding, Input, CuDNNGRU, GlobalMaxPooling1D, 
 from keras.layers import Convolution1D, Dropout, GRU
 
 df2 = pd.read_csv("yelp_2013.csv")
-
 Y = df2.stars.values-1
 Y = to_categorical(Y,num_classes=5)
 X = df2.text.values
@@ -37,17 +36,13 @@ np.random.seed(2018)
 np.random.shuffle(indices)
 X=X[indices]
 Y=Y[indices]
-
 nb_validation_samples_val = int(VALIDATION_SPLIT * X.shape[0])
-
 x_train = X[:-nb_validation_samples_val]
 y_train = Y[:-nb_validation_samples_val]
 x_val =  X[-nb_validation_samples_val:]
 y_val =  Y[-nb_validation_samples_val:]
-
 tokenizer = Tokenizer(nb_words=MAX_NB_WORDS)
-tokenizer.fit_on_texts(df2.text)
-
+tokenizer.fit_on_texts(x_train)
 x_train_word_ids = tokenizer.texts_to_sequences(x_train)
 x_val_word_ids = tokenizer.texts_to_sequences(x_val)
 x_train_padded_seqs = pad_sequences(x_train_word_ids, maxlen=MAX_LEN)
@@ -72,23 +67,41 @@ for word, i in tokenizer.word_index.items():
             embedding_matrix[i] = embedding_vector
         
 class DRNN(Layer):
-    def __init__(self, window_size, hidden_size, maxlen, **kwargs):
+    '''
+    Disconnected-rnn layer.
+    Follows the work of Baoxin Wang. [http://aclweb.org/anthology/P18-1215]
+    "Disconnected Recurrent Neural Networks for Text Categorization"
+    by using recurrent units instead of convolution filters.
+    # Input shape
+        3D tensor with shape: `(batch_size, sequence_length, input_dim)`.
+    # Output shape
+        3D tensor with shape: `(batch_size, sequence_length, hidden_dim)`.
+    How to use:
+    Just put it on top of a 3D-tensor Layer (Embedding/others).
+    The output dimensions are inferred based on the hidden dim of the RNN.
+    Note: The layer has been tested with Keras 2.1.5, Python 2.7.14
+    Example:
+        model.add(Embedding(30000, 200, input_length=30))
+        model.add(DRNN(50, 15))
+        # next add a MaxPooling1D layer or whatever...
+    '''
+    def __init__(self, hidden_size, window_size, **kwargs):
         super(DRNN, self).__init__(**kwargs)
         self.window_size = window_size
         self.hidden_size = hidden_size
-        self.maxlen = maxlen
 
     def compute_output_shape(self, input_shape):
         return input_shape[0], input_shape[1], self.hidden_size
 
     def call(self, inputs): #assume inputs is [2,5,4], window_size is 3, hidden_size is 6
         pad_input = tf.pad(inputs,[[0,0],[self.window_size-1,0],[0,0]]) #pad_input is [2,7,4]
-        rnn_inputs = []
-        for i in range(self.maxlen):
-            rnn_inputs.append(K.expand_dims(tf.slice(pad_input,[0,i,0],[-1,self.window_size,-1]),1)) 
-        rnn_input_tensor = tf.concat(rnn_inputs,1) #rnn_input_tensor is [2,5,3,4]
-        timegru = TimeDistributed(CuDNNGRU(self.hidden_size))(rnn_input_tensor) #timegru is [2,5,6]
-        return timegru
+        drnn_inputs = []
+        seqlen = inputs.shape[1]
+        for i in range(seqlen):
+            drnn_inputs.append(K.expand_dims(tf.slice(pad_input,[0,i,0],[-1,self.window_size,-1]),1)) 
+        drnn_input_tensor = tf.concat(drnn_inputs,1) #rnn_input_tensor is [2,5,3,4]
+        drnn_output = TimeDistributed(CuDNNGRU(self.hidden_size))(drnn_input_tensor) #drnn_output is [2,5,6]
+        return drnn_output
 
 embedding_layer = Embedding(MAX_NB_WORDS + 1,
                             EMBEDDING_DIM,
@@ -98,8 +111,8 @@ embedding_layer = Embedding(MAX_NB_WORDS + 1,
 
 main_input = Input(shape=(MAX_LEN,), dtype='float64')
 embed = embedding_layer(main_input)
-drnn = DRNN(WINDOW_SIZE, NUM_FILTERS, MAX_LEN)(embed)
-#bn = BatchNormalization()(drnn)
+drnn = DRNN(NUM_FILTERS, WINDOW_SIZE)(embed)
+#drnn = BatchNormalization()(drnn)
 '''
 gru = CuDNNGRU(NUM_FILTERS, return_sequences=True)(embed) #gru implementation
 cnn = Convolution1D(NUM_FILTERS, WINDOW_SIZE)(embed) #cnn implementation
