@@ -8,19 +8,16 @@ import tensorflow as tf
 import pandas as pd
 import numpy as np
 from keras import backend as K
-from keras import optimizers,initializers,regularizers,constraints
-from keras.engine.topology import Layer, InputSpec
-from keras.models import Sequential, Model, load_model
+from keras import regularizers
+from keras.engine.topology import Layer
+from keras.models import Sequential, Model
 from keras.preprocessing.sequence import pad_sequences
 from keras.preprocessing.text import Tokenizer, text_to_word_sequence
 from keras.utils.np_utils import to_categorical
-from keras.layers import Dense, Embedding, Activation, Input, Lambda, Reshape, CuDNNGRU, CuDNNLSTM, GlobalMaxPooling1D, concatenate, BatchNormalization
-from keras.layers import Convolution1D, Flatten, Dropout, MaxPool1D, GlobalAveragePooling1D, Merge, LSTM, GRU, Bidirectional, TimeDistributed
-from keras.callbacks import ModelCheckpoint,ReduceLROnPlateau,TensorBoard
-from keras.optimizers import SGD, Adam, Adadelta
+from keras.layers import Dense, Embedding, Input, CuDNNGRU, GlobalMaxPooling1D, BatchNormalization, TimeDistributed
+from keras.layers import Convolution1D, Dropout, GRU
 
 df2 = pd.read_csv("yelp_2013.csv")
-df2['text']=df2['text'].astype(str)
 
 Y = df2.stars.values-1
 Y = to_categorical(Y,num_classes=5)
@@ -48,11 +45,11 @@ y_train = Y[:-nb_validation_samples_val]
 x_val =  X[-nb_validation_samples_val:]
 y_val =  Y[-nb_validation_samples_val:]
 
-tokenizer1 = Tokenizer(nb_words=MAX_NB_WORDS)
-tokenizer1.fit_on_texts(df2.text)
+tokenizer = Tokenizer(nb_words=MAX_NB_WORDS)
+tokenizer.fit_on_texts(df2.text)
 
-x_train_word_ids = tokenizer1.texts_to_sequences(x_train)
-x_val_word_ids = tokenizer1.texts_to_sequences(x_val)
+x_train_word_ids = tokenizer.texts_to_sequences(x_train)
+x_val_word_ids = tokenizer.texts_to_sequences(x_val)
 x_train_padded_seqs = pad_sequences(x_train_word_ids, maxlen=MAX_LEN)
 x_val_padded_seqs = pad_sequences(x_val_word_ids, maxlen=MAX_LEN)
 
@@ -67,7 +64,7 @@ f.close()
 print('Found %s word vectors.' % len(embeddings_index))
 
 embedding_matrix = np.random.random((MAX_NB_WORDS + 1, EMBEDDING_DIM))
-for word, i in tokenizer1.word_index.items():
+for word, i in tokenizer.word_index.items():
     if i<MAX_NB_WORDS:
         embedding_vector = embeddings_index.get(word)
         if embedding_vector is not None:
@@ -93,14 +90,12 @@ class DRNN(Layer):
         timegru = TimeDistributed(CuDNNGRU(self.hidden_size))(rnn_input_tensor) #timegru is [2,5,6]
         return timegru
 
-from keras import regularizers
 embedding_layer = Embedding(MAX_NB_WORDS + 1,
                             EMBEDDING_DIM,
                             weights=[embedding_matrix],
                             input_length=MAX_LEN)
 #                            embeddings_regularizer=regularizers.l2(0.0001))
 
-from keras.layers import concatenate
 main_input = Input(shape=(MAX_LEN,), dtype='float64')
 embed = embedding_layer(main_input)
 drnn = DRNN(WINDOW_SIZE, NUM_FILTERS, MAX_LEN)(embed)
@@ -114,9 +109,7 @@ main_output = Dense(5, activation='softmax')(pool)
 model = Model(inputs = main_input, outputs = main_output)
 print model.summary()
 
-adadelta = Adadelta()
-adam = Adam(lr=0.001)
-model.compile(loss='categorical_crossentropy', optimizer=adadelta, metrics=['acc'])
+model.compile(loss='categorical_crossentropy', optimizer='adadelta', metrics=['acc'])
 model.fit(x_train_padded_seqs, y_train, 
           validation_data = (x_val_padded_seqs, y_val),
           nb_epoch = EPOCHS, 
