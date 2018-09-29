@@ -14,10 +14,11 @@ from keras.models import Sequential, Model
 from keras.preprocessing.sequence import pad_sequences
 from keras.preprocessing.text import Tokenizer, text_to_word_sequence
 from keras.utils.np_utils import to_categorical
-from keras.layers import Dense, Embedding, Input, CuDNNGRU, GlobalMaxPooling1D, BatchNormalization, TimeDistributed
+from keras.layers import Dense, Embedding, Input, CuDNNGRU, GlobalMaxPooling1D, BatchNormalization, TimeDistributed, Flatten
 from keras.layers import Convolution1D, Dropout, GRU
 
-df2 = pd.read_csv("yelp_2013.csv") #The information about the test dataset could be found at https://github.com/zepingyu0512/srnn
+df2 = pd.read_csv("yelp_2013.csv")
+#df2 = df2.sample(1000)
 Y = df2.stars.values-1
 Y = to_categorical(Y,num_classes=5)
 X = df2.text.values
@@ -26,10 +27,10 @@ MAX_NB_WORDS = 30000
 EMBEDDING_DIM = 200
 VALIDATION_SPLIT = 0.2
 NUM_FILTERS = 50
-MAX_LEN = 200
-BATCH_SIZE = 100
+MAX_LEN = 400
+BATCH_SIZE = 64
 EPOCHS = 30
-WINDOW_SIZE = 15
+WINDOW_SIZE = 8
 
 indices = np.arange(X.shape[0])
 np.random.seed(2018)
@@ -47,26 +48,8 @@ x_train_word_ids = tokenizer.texts_to_sequences(x_train)
 x_val_word_ids = tokenizer.texts_to_sequences(x_val)
 x_train_padded_seqs = pad_sequences(x_train_word_ids, maxlen=MAX_LEN)
 x_val_padded_seqs = pad_sequences(x_val_word_ids, maxlen=MAX_LEN)
-
-embeddings_index = {}
-f = open('glove.6B.200d.txt')
-for line in f:
-    values = line.split()
-    word = values[0]
-    coefs = np.asarray(values[1:], dtype='float32')
-    embeddings_index[word] = coefs
-f.close()
-print('Found %s word vectors.' % len(embeddings_index))
-
-embedding_matrix = np.random.random((MAX_NB_WORDS + 1, EMBEDDING_DIM))
-for word, i in tokenizer.word_index.items():
-    if i<MAX_NB_WORDS:
-        embedding_vector = embeddings_index.get(word)
-        if embedding_vector is not None:
-        # words not found in embedding index will be random.
-            embedding_matrix[i] = embedding_vector
-        
-class DRNN(Layer):
+   
+class DRNN_Slice(Layer):
     '''
     Disconnected-rnn layer.
     Follows the work of Baoxin Wang. [http://aclweb.org/anthology/P18-1215]
@@ -85,24 +68,51 @@ class DRNN(Layer):
         model.add(DRNN(50, 15))
         # next add a MaxPooling1D layer or whatever...
     '''
-    def __init__(self, hidden_size, window_size, **kwargs):
-        super(DRNN, self).__init__(**kwargs)
+    def __init__(self, window_size, dilation=1, **kwargs):
+        super(DRNN_Slice, self).__init__(**kwargs)
         self.window_size = window_size
-        self.hidden_size = hidden_size
+#        self.hidden_size = hidden_size
+        self.dilation = dilation
 
     def compute_output_shape(self, input_shape):
-        return input_shape[0], input_shape[1], self.hidden_size
+        return input_shape[0], input_shape[1], self.window_size, input_shape[2]
 
     def call(self, inputs): #assume inputs is [2,5,4], window_size is 3, hidden_size is 6
-        pad_input = tf.pad(inputs,[[0,0],[self.window_size-1,0],[0,0]]) #pad_input is [2,7,4]
+        pad_input = tf.pad(inputs,[[0,0],[(self.window_size-1)*self.dilation,0],[0,0]]) #pad_input is [2,7,4]
         drnn_inputs = []
         seqlen = inputs.shape[1]
         for i in range(seqlen):
-            drnn_inputs.append(K.expand_dims(tf.slice(pad_input,[0,i,0],[-1,self.window_size,-1]),1)) 
+            if self.dilation == 1:
+                drnn_inputs.append(K.expand_dims(tf.slice(pad_input,[0,i,0],[-1,self.window_size,-1]),1))
+            else:
+                drnn_inputs.append(K.expand_dims(tf.transpose(tf.gather(tf.transpose(pad_input,[1,0,2]),
+                                                range(i,i+(self.window_size-1)*self.dilation+1,self.dilation)),[1,0,2]),1))
         drnn_input_tensor = tf.concat(drnn_inputs,1) #rnn_input_tensor is [2,5,3,4]
-        drnn_output = TimeDistributed(CuDNNGRU(self.hidden_size))(drnn_input_tensor) #drnn_output is [2,5,6]
-        return drnn_output
+        return drnn_input_tensor
 
+def DRNN(inputs, hidden_size, window_size):
+    drnn_slice = DRNN_Slice(window_size)(inputs)      
+    drnn = TimeDistributed(CuDNNGRU(hidden_size))(drnn_slice)
+    return drnn
+
+embeddings_index = {}
+f = open('glove.6B.200d.txt')
+for line in f:
+    values = line.split()
+    word = values[0]
+    coefs = np.asarray(values[1:], dtype='float32')
+    embeddings_index[word] = coefs
+f.close()
+print('Found %s word vectors.' % len(embeddings_index))
+
+embedding_matrix = np.random.random((MAX_NB_WORDS + 1, EMBEDDING_DIM))
+for word, i in tokenizer.word_index.items():
+    if i<MAX_NB_WORDS:
+        embedding_vector = embeddings_index.get(word)
+        if embedding_vector is not None:
+        # words not found in embedding index will be random.
+            embedding_matrix[i] = embedding_vector
+            
 embedding_layer = Embedding(MAX_NB_WORDS + 1,
                             EMBEDDING_DIM,
                             weights=[embedding_matrix],
@@ -111,18 +121,18 @@ embedding_layer = Embedding(MAX_NB_WORDS + 1,
 
 main_input = Input(shape=(MAX_LEN,), dtype='float64')
 embed = embedding_layer(main_input)
-drnn = DRNN(NUM_FILTERS, WINDOW_SIZE)(embed)
+drnn = DRNN(embed, NUM_FILTERS, WINDOW_SIZE)
 #drnn = BatchNormalization()(drnn)
 '''
 gru = CuDNNGRU(NUM_FILTERS, return_sequences=True)(embed) #gru implementation
 cnn = Convolution1D(NUM_FILTERS, WINDOW_SIZE)(embed) #cnn implementation
 '''
-pool = GlobalMaxPooling1D()(drnn) #change drnn into gru or cnn when comparing
+pool = GlobalMaxPooling1D()(drnn)
 main_output = Dense(5, activation='softmax')(pool)
 model = Model(inputs = main_input, outputs = main_output)
 print model.summary()
 
-model.compile(loss='categorical_crossentropy', optimizer='adadelta', metrics=['acc'])
+model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['acc'])
 model.fit(x_train_padded_seqs, y_train, 
           validation_data = (x_val_padded_seqs, y_val),
           nb_epoch = EPOCHS, 
